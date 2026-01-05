@@ -1,0 +1,12 @@
+# Telegram Multi-Client Member Adder
+# Requirements
+
+# Ana kütüphaneler
+pyrogram>=2.0.0
+tgcrypto>=1.2.5  # Pyrogram için hızlı şifreleme
+
+# MongoDB desteği (opsiyonel)
+motor>=3.0.0  # Async MongoDB driver
+
+# Yardımcı kütüphaneler
+python-dotenv>=1.0.0  # Çevre değişkenleri (opsiyonel)
