@@ -6,6 +6,7 @@ Bot komutları, inline panel ve interaktif yönetim.
 
 import asyncio
 import logging
+import functools
 from typing import Optional
 from datetime import datetime
 
@@ -28,25 +29,27 @@ logger = logging.getLogger(__name__)
 
 def owner_only(func):
     """Sadece owner kullanabilir decorator"""
-    async def wrapper(client: Client, message: Message):
+    @functools.wraps(func)
+    async def wrapper(self, client: Client, message: Message):
         if message.from_user.id != config.OWNER_ID:
             return
-        return await func(client, message)
+        return await func(self, client, message)
     return wrapper
 
 
 def owner_only_callback(func):
-    """Callback için owner only"""
-    async def wrapper(client: Client, callback: CallbackQuery):
+    """Callback icin owner only"""
+    @functools.wraps(func)
+    async def wrapper(self, client: Client, callback: CallbackQuery):
         if callback.from_user.id != config.OWNER_ID:
-            await callback.answer("⛔ Bu paneli sadece bot sahibi kullanabilir!", show_alert=True)
+            await callback.answer("Bu paneli sadece bot sahibi kullanabilir!", show_alert=True)
             return
-        return await func(client, callback)
+        return await func(self, client, callback)
     return wrapper
 
 
 class BotHandlers:
-    """Bot komut ve callback handler'ları"""
+    """Bot komut ve callback handler'lari"""
     
     def __init__(self, bot: Client, db: DatabaseInterface, 
                  manager: UserbotManager, engine: MemberAddingEngine):
@@ -60,49 +63,54 @@ class BotHandlers:
         self.engine.set_progress_callback(self._on_progress_update)
     
     def register_handlers(self):
-        """Handler'ları kaydet"""
-        self.bot.add_handler(MessageHandler(
-            self._cmd_start, 
-            filters.command("start") & filters.private
-        ))
-        self.bot.add_handler(MessageHandler(
-            self._cmd_panel,
-            filters.command(["panel", "durum"]) & filters.private
-        ))
-        self.bot.add_handler(MessageHandler(
-            self._cmd_session,
-            filters.command("session") & filters.private
-        ))
-        self.bot.add_handler(MessageHandler(
-            self._cmd_add,
-            filters.command(["ekle", "add"]) & filters.private
-        ))
-        self.bot.add_handler(MessageHandler(
-            self._cmd_stop,
-            filters.command(["durdur", "stop"]) & filters.private
-        ))
-        self.bot.add_handler(MessageHandler(
-            self._cmd_help,
-            filters.command(["yardim", "help"]) & filters.private
-        ))
+        """Handler'lari kaydet"""
+        # /start
+        @self.bot.on_message(filters.command("start") & filters.private)
+        async def start_handler(client, message):
+            await self._cmd_start(client, message)
         
-        self.bot.add_handler(CallbackQueryHandler(
-            self._callback_handler,
-            filters.regex(r"^(panel|refresh|sessions|stats|pause|resume|stop|close).*")
-        ))
+        # /panel veya /durum
+        @self.bot.on_message(filters.command(["panel", "durum"]) & filters.private)
+        async def panel_handler(client, message):
+            await self._cmd_panel(client, message)
+        
+        # /session
+        @self.bot.on_message(filters.command("session") & filters.private)
+        async def session_handler(client, message):
+            await self._cmd_session(client, message)
+        
+        # /ekle veya /add
+        @self.bot.on_message(filters.command(["ekle", "add"]) & filters.private)
+        async def add_handler(client, message):
+            await self._cmd_add(client, message)
+        
+        # /durdur veya /stop
+        @self.bot.on_message(filters.command(["durdur", "stop"]) & filters.private)
+        async def stop_handler(client, message):
+            await self._cmd_stop(client, message)
+        
+        # /yardim veya /help
+        @self.bot.on_message(filters.command(["yardim", "help"]) & filters.private)
+        async def help_handler(client, message):
+            await self._cmd_help(client, message)
+        
+        # Callback handler
+        @self.bot.on_callback_query(filters.regex(r"^(panel|refresh|sessions|stats|pause|resume|stop|close).*"))
+        async def callback_handler(client, callback):
+            await self._callback_handler(client, callback)
     
     def _progress_bar(self, current: int, total: int, length: int = 20) -> str:
-        """Progress bar oluştur"""
+        """Progress bar olustur"""
         if total == 0:
-            return "░" * length
+            return "=" * length
         filled = int(length * current / total)
         empty = length - filled
-        bar = "█" * filled + "░" * empty
+        bar = "#" * filled + "-" * empty
         percent = (current / total) * 100
         return f"[{bar}] {percent:.1f}%"
     
     def _format_time(self, seconds: int) -> str:
-        """Saniyeyi okunabilir formata çevir"""
+        """Saniyeyi okunabilir formata cevir"""
         if seconds < 60:
             return f"{seconds}s"
         elif seconds < 3600:
@@ -111,86 +119,84 @@ class BotHandlers:
             return f"{seconds // 3600}sa {(seconds % 3600) // 60}dk"
     
     async def _build_panel_text(self) -> str:
-        """Panel metnini oluştur"""
+        """Panel metnini olustur"""
         stats = await self.db.get_stats()
-        cfg = config.PanelConfig
         
-        text = "🎛️ **Multi-Client Member Adder Panel**\n"
-        text += "━" * 35 + "\n\n"
+        text = "** Multi-Client Member Adder Panel **\n"
+        text += "=" * 35 + "\n\n"
         
-        text += f"{cfg.EMOJI_BOT} **Worker Durumu:**\n"
-        text += f"├ Toplam: `{stats['total_sessions']}`\n"
-        text += f"├ Aktif: `{stats['active_sessions']}`\n"
-        text += f"├ Beklemede: `{stats['paused_sessions']}`\n"
-        text += f"└ Pasif: `{stats['inactive_sessions']}`\n\n"
+        text += "[BOT] Worker Durumu:\n"
+        text += f"  - Toplam: {stats['total_sessions']}\n"
+        text += f"  - Aktif: {stats['active_sessions']}\n"
+        text += f"  - Beklemede: {stats['paused_sessions']}\n"
+        text += f"  - Pasif: {stats['inactive_sessions']}\n\n"
         
-        text += f"{cfg.EMOJI_USER} **Kullanıcı Havuzu:**\n"
-        text += f"├ {cfg.EMOJI_VALID} Valid: `{stats['valid_users']}`\n"
-        text += f"└ {cfg.EMOJI_BLACKLIST} Kara Liste: `{stats['blacklisted_users']}`\n\n"
+        text += "[USER] Kullanici Havuzu:\n"
+        text += f"  - Valid: {stats['valid_users']}\n"
+        text += f"  - Kara Liste: {stats['blacklisted_users']}\n\n"
         
-        text += f"📊 **İstatistikler:**\n"
-        text += f"├ Bugün: `{stats['added_today']}`\n"
-        text += f"└ Toplam: `{stats['total_added']}`\n\n"
+        text += "[STATS] Istatistikler:\n"
+        text += f"  - Bugun: {stats['added_today']}\n"
+        text += f"  - Toplam: {stats['total_added']}\n\n"
         
         progress = self.engine.get_progress()
         if progress and self.engine.is_running:
-            status_emoji = {
-                TaskStatus.RUNNING: cfg.EMOJI_WORKING,
-                TaskStatus.PAUSED: cfg.EMOJI_PAUSED,
-                TaskStatus.COMPLETED: cfg.EMOJI_SUCCESS,
-                TaskStatus.FAILED: cfg.EMOJI_FAILED,
-            }.get(progress.status, "❓")
+            status_text = {
+                TaskStatus.RUNNING: "[CALISIYOR]",
+                TaskStatus.PAUSED: "[DURAKLATILDI]",
+                TaskStatus.COMPLETED: "[TAMAMLANDI]",
+                TaskStatus.FAILED: "[BASARISIZ]",
+            }.get(progress.status, "[?]")
             
-            text += f"{status_emoji} **Aktif Görev:**\n"
-            text += f"├ `{progress.source_title}` → `{progress.target_title}`\n"
-            text += f"├ {self._progress_bar(progress.processed, progress.total_users)}\n"
-            text += f"├ {cfg.EMOJI_SUCCESS} `{progress.added}` | "
-            text += f"{cfg.EMOJI_FAILED} `{progress.failed}` | "
-            text += f"⏭️ `{progress.skipped}`\n"
-            text += f"├ Worker: `{progress.available_workers}/{progress.active_workers}`\n"
+            text += f"{status_text} Aktif Gorev:\n"
+            text += f"  Kaynak: {progress.source_title}\n"
+            text += f"  Hedef: {progress.target_title}\n"
+            text += f"  {self._progress_bar(progress.processed, progress.total_users)}\n"
+            text += f"  [+] Eklenen: {progress.added}\n"
+            text += f"  [-] Basarisiz: {progress.failed}\n"
+            text += f"  [>] Atlanan: {progress.skipped}\n"
+            text += f"  Worker: {progress.available_workers}/{progress.active_workers}\n"
             
             if progress.current_user:
-                text += f"├ Şu an: `{progress.current_user}`\n"
+                text += f"  Su an: {progress.current_user}\n"
             if progress.estimated_remaining:
-                text += f"└ Kalan: `{self._format_time(progress.estimated_remaining)}`\n"
-            else:
-                text += "└ Kalan: `Hesaplanıyor...`\n"
+                text += f"  Kalan: {self._format_time(progress.estimated_remaining)}\n"
         else:
-            text += "💤 **Aktif görev yok**\n"
+            text += "[BOSTA] Aktif gorev yok\n"
         
-        text += "\n" + "━" * 35
-        text += f"\n🕐 `{datetime.now().strftime('%H:%M:%S')}`"
+        text += "\n" + "=" * 35
+        text += f"\nGuncelleme: {datetime.now().strftime('%H:%M:%S')}"
         
         return text
     
     def _build_panel_keyboard(self) -> InlineKeyboardMarkup:
-        """Panel butonlarını oluştur"""
+        """Panel butonlarini olustur"""
         buttons = [
             [
-                InlineKeyboardButton("🔄 Yenile", callback_data="refresh"),
-                InlineKeyboardButton("📊 İstatistik", callback_data="stats")
+                InlineKeyboardButton("Yenile", callback_data="refresh"),
+                InlineKeyboardButton("Istatistik", callback_data="stats")
             ],
-            [InlineKeyboardButton("🤖 Worker'lar", callback_data="sessions")]
+            [InlineKeyboardButton("Worker'lar", callback_data="sessions")]
         ]
         
         if self.engine.is_running:
             if self.engine.is_paused:
                 buttons.append([
-                    InlineKeyboardButton("▶️ Devam", callback_data="resume"),
-                    InlineKeyboardButton("⏹️ Durdur", callback_data="stop")
+                    InlineKeyboardButton("Devam", callback_data="resume"),
+                    InlineKeyboardButton("Durdur", callback_data="stop")
                 ])
             else:
                 buttons.append([
-                    InlineKeyboardButton("⏸️ Duraklat", callback_data="pause"),
-                    InlineKeyboardButton("⏹️ Durdur", callback_data="stop")
+                    InlineKeyboardButton("Duraklat", callback_data="pause"),
+                    InlineKeyboardButton("Durdur", callback_data="stop")
                 ])
         
-        buttons.append([InlineKeyboardButton("❌ Kapat", callback_data="close")])
+        buttons.append([InlineKeyboardButton("Kapat", callback_data="close")])
         
         return InlineKeyboardMarkup(buttons)
     
     async def _on_progress_update(self, progress: AddingProgress):
-        """Progress güncellendiğinde panel'i güncelle"""
+        """Progress guncellendiginde panel'i guncelle"""
         if self.panel_message_id and self.panel_chat_id:
             try:
                 text = await self._build_panel_text()
@@ -203,78 +209,87 @@ class BotHandlers:
                 )
             except Exception as e:
                 if "not modified" not in str(e).lower():
-                    logger.warning(f"Panel güncelleme hatası: {e}")
+                    logger.warning(f"Panel guncelleme hatasi: {e}")
     
-    @owner_only
     async def _cmd_start(self, client: Client, message: Message):
         """Start komutu"""
+        if message.from_user.id != config.OWNER_ID:
+            await message.reply("Bu bot ozeldir.")
+            return
+        
         text = (
-            "🚀 **Telegram Multi-Client Member Adder**\n\n"
-            "**Komutlar:**\n"
-            "• `/panel` - Kontrol paneli\n"
-            "• `/session <string>` - Userbot ekle\n"
-            "• `/ekle @kaynak @hedef` - Üye ekle\n"
-            "• `/durdur` - Görevi durdur\n"
-            "• `/yardim` - Detaylı yardım"
+            "** Telegram Multi-Client Member Adder **\n\n"
+            "Komutlar:\n"
+            "- /panel - Kontrol paneli\n"
+            "- /session <string> - Userbot ekle\n"
+            "- /ekle @kaynak @hedef - Uye ekle\n"
+            "- /durdur - Gorevi durdur\n"
+            "- /yardim - Detayli yardim"
         )
         await message.reply(text)
     
-    @owner_only
     async def _cmd_panel(self, client: Client, message: Message):
         """Panel komutu"""
+        if message.from_user.id != config.OWNER_ID:
+            return
+        
         text = await self._build_panel_text()
         keyboard = self._build_panel_keyboard()
         msg = await message.reply(text, reply_markup=keyboard)
         self.panel_message_id = msg.id
         self.panel_chat_id = msg.chat.id
     
-    @owner_only
     async def _cmd_session(self, client: Client, message: Message):
         """Session ekleme komutu"""
+        if message.from_user.id != config.OWNER_ID:
+            return
+        
         args = message.text.split(maxsplit=1)
         
         if len(args) < 2:
             await message.reply(
-                "❌ **Kullanım:** `/session <StringSession>`\n\n"
-                "StringSession almak için @StringSessionBot kullanın."
+                "Kullanim: /session <StringSession>\n\n"
+                "StringSession almak icin @StringSessionBot kullanin."
             )
             return
         
         string_session = args[1].strip()
-        status_msg = await message.reply("🔄 **Session kontrol ediliyor...**")
+        status_msg = await message.reply("Session kontrol ediliyor...")
         
         result = await self.manager.add_session(string_session)
         
         if result["success"]:
-            await status_msg.edit(
-                f"✅ **Session eklendi!**\n\n"
-                f"📋 ID: `{result['session_id']}`\n"
-                f"👤 User: `{result['user_id']}`\n"
-                f"📛 @{result['username'] or 'Yok'}"
+            await status_msg.edit_text(
+                f"[OK] Session eklendi!\n\n"
+                f"ID: {result['session_id']}\n"
+                f"User: {result['user_id']}\n"
+                f"Username: @{result['username'] or 'Yok'}"
             )
         else:
-            await status_msg.edit(f"❌ **Hata:** `{result['error']}`")
+            await status_msg.edit_text(f"[HATA] {result['error']}")
     
-    @owner_only
     async def _cmd_add(self, client: Client, message: Message):
-        """Üye ekleme komutu"""
+        """Uye ekleme komutu"""
+        if message.from_user.id != config.OWNER_ID:
+            return
+        
         args = message.text.split()
         
         if len(args) < 3:
-            await message.reply("❌ **Kullanım:** `/ekle @kaynak @hedef`")
+            await message.reply("Kullanim: /ekle @kaynak @hedef")
             return
         
         source, target = args[1], args[2]
-        status_msg = await message.reply("🔄 **Hazırlanıyor...**")
+        status_msg = await message.reply("Hazirlaniyor...")
         
         result = await self.engine.start_adding(client, source, target)
         
         if result["success"]:
-            await status_msg.edit(
-                f"✅ **Başlatıldı!**\n\n"
-                f"📤 `{result['source_title']}`\n"
-                f"📥 `{result['target_title']}`\n"
-                f"👥 `{result['total_users']}` üye"
+            await status_msg.edit_text(
+                f"[OK] Baslatildi!\n\n"
+                f"Kaynak: {result['source_title']}\n"
+                f"Hedef: {result['target_title']}\n"
+                f"Toplam: {result['total_users']} uye"
             )
             
             text = await self._build_panel_text()
@@ -283,55 +298,62 @@ class BotHandlers:
             self.panel_message_id = panel_msg.id
             self.panel_chat_id = panel_msg.chat.id
         else:
-            await status_msg.edit(f"❌ **Hata:** `{result['error']}`")
+            await status_msg.edit_text(f"[HATA] {result['error']}")
     
-    @owner_only
     async def _cmd_stop(self, client: Client, message: Message):
         """Durdurma komutu"""
+        if message.from_user.id != config.OWNER_ID:
+            return
+        
         if not self.engine.is_running:
-            await message.reply("ℹ️ Aktif görev yok.")
+            await message.reply("Aktif gorev yok.")
             return
         await self.engine.stop()
-        await message.reply("⏹️ **Görev durduruldu.**")
+        await message.reply("[OK] Gorev durduruldu.")
     
-    @owner_only
     async def _cmd_help(self, client: Client, message: Message):
-        """Yardım komutu"""
+        """Yardim komutu"""
+        if message.from_user.id != config.OWNER_ID:
+            return
+        
         text = (
-            "📖 **Kullanım Kılavuzu**\n\n"
-            "**1️⃣ Session Ekleme:**\n"
-            "`/session AQB...StringSession...`\n\n"
-            "**2️⃣ Üye Ekleme:**\n"
-            "`/ekle @kaynakgrup @hedefgrup`\n\n"
-            "**3️⃣ Panel:**\n"
-            "`/panel`\n\n"
-            "**🔒 Özellikler:**\n"
-            "• Valid user önceliği\n"
-            "• Akıllı FloodWait yönetimi\n"
-            "• Çoklu worker rotasyonu\n"
-            "• Kara liste sistemi"
+            "** Kullanim Kilavuzu **\n\n"
+            "1. Session Ekleme:\n"
+            "   /session AQB...StringSession...\n\n"
+            "2. Uye Ekleme:\n"
+            "   /ekle @kaynakgrup @hedefgrup\n\n"
+            "3. Panel:\n"
+            "   /panel\n\n"
+            "Ozellikler:\n"
+            "- Valid user onceligi\n"
+            "- Akilli FloodWait yonetimi\n"
+            "- Coklu worker rotasyonu\n"
+            "- Kara liste sistemi"
         )
         await message.reply(text)
     
-    @owner_only_callback
     async def _callback_handler(self, client: Client, callback: CallbackQuery):
         """Callback handler"""
+        if callback.from_user.id != config.OWNER_ID:
+            await callback.answer("Bu paneli sadece bot sahibi kullanabilir!", show_alert=True)
+            return
+        
         data = callback.data
         
         if data == "refresh":
             text = await self._build_panel_text()
             keyboard = self._build_panel_keyboard()
-            await callback.message.edit(text, reply_markup=keyboard)
-            await callback.answer("🔄 Güncellendi!")
+            await callback.message.edit_text(text, reply_markup=keyboard)
+            await callback.answer("Guncellendi!")
         
         elif data == "stats":
             stats = await self.db.get_stats()
             text = (
-                f"📊 **İstatistikler**\n\n"
+                f"** Istatistikler **\n\n"
                 f"Worker: {stats['active_sessions']}/{stats['total_sessions']}\n"
                 f"Valid: {stats['valid_users']}\n"
                 f"Blacklist: {stats['blacklisted_users']}\n"
-                f"Bugün: {stats['added_today']}\n"
+                f"Bugun: {stats['added_today']}\n"
                 f"Toplam: {stats['total_added']}"
             )
             await callback.answer()
@@ -343,11 +365,11 @@ class BotHandlers:
                 await callback.answer("Worker yok!", show_alert=True)
                 return
             
-            text = "🤖 **Worker'lar**\n\n"
+            text = "** Worker'lar **\n\n"
             for s in statuses:
-                icon = "🟢" if s.is_connected and s.is_available else "🔴"
+                icon = "[+]" if s.is_connected and s.is_available else "[-]"
                 if s.flood_until:
-                    icon = "🟡"
+                    icon = "[~]"
                 text += f"{icon} #{s.session_id} @{s.username or s.user_id} ({s.added_today})\n"
             
             await callback.answer()
@@ -356,32 +378,32 @@ class BotHandlers:
         elif data == "pause":
             if self.engine.is_running:
                 await self.engine.pause()
-                await callback.answer("⏸️ Duraklatıldı!")
+                await callback.answer("Duraklatildi!")
                 text = await self._build_panel_text()
                 keyboard = self._build_panel_keyboard()
-                await callback.message.edit(text, reply_markup=keyboard)
+                await callback.message.edit_text(text, reply_markup=keyboard)
             else:
-                await callback.answer("Aktif görev yok!", show_alert=True)
+                await callback.answer("Aktif gorev yok!", show_alert=True)
         
         elif data == "resume":
             if self.engine.is_running and self.engine.is_paused:
                 await self.engine.resume()
-                await callback.answer("▶️ Devam!")
+                await callback.answer("Devam!")
                 text = await self._build_panel_text()
                 keyboard = self._build_panel_keyboard()
-                await callback.message.edit(text, reply_markup=keyboard)
+                await callback.message.edit_text(text, reply_markup=keyboard)
             else:
-                await callback.answer("Duraklatılmış görev yok!", show_alert=True)
+                await callback.answer("Duraklatilmis gorev yok!", show_alert=True)
         
         elif data == "stop":
             if self.engine.is_running:
                 await self.engine.stop()
-                await callback.answer("⏹️ Durduruldu!")
+                await callback.answer("Durduruldu!")
                 text = await self._build_panel_text()
                 keyboard = self._build_panel_keyboard()
-                await callback.message.edit(text, reply_markup=keyboard)
+                await callback.message.edit_text(text, reply_markup=keyboard)
             else:
-                await callback.answer("Aktif görev yok!", show_alert=True)
+                await callback.answer("Aktif gorev yok!", show_alert=True)
         
         elif data == "close":
             await callback.message.delete()
