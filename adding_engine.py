@@ -14,13 +14,16 @@ from dataclasses import dataclass
 from enum import Enum
 
 from pyrogram import Client
-from pyrogram.types import User, Chat, ChatMember
+from pyrogram.types import User, Chat, ChatMember, ChatPrivileges
 from pyrogram.enums import ChatMembersFilter, ChatMemberStatus
 from pyrogram.errors import (
     FloodWait,
     ChannelPrivate,
     ChatAdminRequired,
-    UserNotParticipant
+    UserNotParticipant,
+    UserAdminInvalid,
+    ChatAdminInviteRequired,
+    RightForbidden
 )
 
 import config
@@ -89,6 +92,54 @@ class MemberAddingEngine:
     def set_progress_callback(self, callback: Callable):
         """Ilerleme callback'i ayarla"""
         self._progress_callback = callback
+    
+    async def _promote_workers_in_chat(self, admin_client: Client, chat_id: int) -> int:
+        """Worker'lara hedef grupta uye ekleme yetkisi ver"""
+        promoted = 0
+        
+        for worker in self.manager.workers.values():
+            if not worker.is_connected:
+                continue
+            
+            try:
+                # Worker'in user_id'sini al
+                worker_user_id = worker.session.user_id
+                
+                # Sadece uye ekleme yetkisi ver
+                await admin_client.promote_chat_member(
+                    chat_id=chat_id,
+                    user_id=worker_user_id,
+                    privileges=ChatPrivileges(
+                        can_invite_users=True,  # Uye ekleme yetkisi
+                        can_manage_chat=False,
+                        can_delete_messages=False,
+                        can_restrict_members=False,
+                        can_promote_members=False,
+                        can_change_info=False,
+                        can_post_messages=False,
+                        can_edit_messages=False,
+                        can_pin_messages=False,
+                        can_manage_video_chats=False
+                    )
+                )
+                promoted += 1
+                logger.info(f"Worker {worker.session.id} (@{worker.session.username}) admin yapildi")
+                await asyncio.sleep(1)  # Rate limit
+                
+            except UserAdminInvalid:
+                logger.warning(f"Worker {worker.session.id} admin yapilamadi - gecersiz kullanici")
+            except ChatAdminRequired:
+                logger.warning(f"Bot'un admin yetkisi yok, worker'lar admin yapilamadi")
+                break
+            except RightForbidden:
+                logger.warning(f"Bot'un admin atama yetkisi yok")
+                break
+            except ChatAdminInviteRequired:
+                logger.warning(f"Bot'un uye davet yetkisi yok")
+            except Exception as e:
+                logger.warning(f"Worker {worker.session.id} admin yapilamadi: {e}")
+        
+        return promoted
     
     async def _notify_progress(self):
         """Ilerleme bildir"""
@@ -244,6 +295,15 @@ class MemberAddingEngine:
                 target_join_id = self._target_username if self._target_username else target_entity.id
                 await self.manager.ensure_workers_in_chat(target_join_id, target_entity.id)
                 await asyncio.sleep(2)
+            
+            # Worker'lara hedef grupta admin yetkisi ver
+            logger.info("Worker'lara admin yetkisi veriliyor...")
+            promoted = await self._promote_workers_in_chat(admin_client, target_entity.id)
+            if promoted > 0:
+                logger.info(f"[OK] {promoted} worker'a admin yetkisi verildi")
+                await asyncio.sleep(2)
+            else:
+                logger.warning("Hicbir worker'a admin yetkisi verilemedi - bot admin olmayabilir")
             
             # Ilk worker'i sec
             worker = await self.manager.get_next_available_worker()
