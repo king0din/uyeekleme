@@ -21,7 +21,15 @@ from pyrogram import Client
 import config
 from database import get_database
 from userbot_manager import UserbotManager
-from adding_engine import MemberAddingEngine
+
+# Anti-spam engine kullan
+try:
+    from adding_engine_antispam import AntiSpamAddingEngine as MemberAddingEngine
+    ANTISPAM_MODE = True
+except ImportError:
+    from adding_engine import MemberAddingEngine
+    ANTISPAM_MODE = False
+
 from bot_handlers import BotHandlers
 
 # ==================== LOGGING AYARLARI ====================
@@ -166,6 +174,9 @@ class MemberAdderApp:
             
             logger.info("")
             logger.info("[OK] Sistem hazir!")
+            if ANTISPAM_MODE:
+                logger.info("[!] ANTI-SPAM MODU AKTIF")
+                logger.info("    Kullanicilar contact olarak eklenip gruba ekleniyor")
             logger.info(f"[INFO] Owner ID: {config.OWNER_ID}")
             logger.info("[INFO] Durdurmak icin Ctrl+C")
             logger.info("")
