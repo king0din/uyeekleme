@@ -1,7 +1,8 @@
 """
 Telegram Multi-Client Member Adder - Adding Engine
 ===================================================
-Akıllı üye ekleme motoru - valid user havuzu ve çakışma önleme.
+Akilli uye ekleme motoru - PEER_ID_INVALID duzeltildi.
+Userbot'un kendi aldigi uyeleri kullaniyor.
 """
 
 import asyncio
@@ -53,12 +54,21 @@ class AddingProgress:
     active_workers: int
     available_workers: int
     current_user: Optional[str]
-    estimated_remaining: Optional[int]  # saniye
+    estimated_remaining: Optional[int]
     errors: List[str]
 
 
+@dataclass
+class UserInfo:
+    """Kullanici bilgisi"""
+    user_id: int
+    username: Optional[str]
+    first_name: Optional[str]
+    access_hash: Optional[int] = None
+
+
 class MemberAddingEngine:
-    """Akıllı üye ekleme motoru"""
+    """Akilli uye ekleme motoru"""
     
     def __init__(self, db: DatabaseInterface, manager: UserbotManager):
         self.db = db
@@ -69,92 +79,89 @@ class MemberAddingEngine:
         self.should_stop = False
         self.progress: Optional[AddingProgress] = None
         self._progress_callback: Optional[Callable] = None
-        self._processed_users: Set[int] = set()  # Çakışma önleme
+        self._processed_users: Set[int] = set()
         self._lock = asyncio.Lock()
+        
+        # Kaynak ve hedef bilgileri
+        self._source_username: Optional[str] = None
+        self._target_username: Optional[str] = None
     
     def set_progress_callback(self, callback: Callable):
-        """İlerleme callback'i ayarla"""
+        """Ilerleme callback'i ayarla"""
         self._progress_callback = callback
     
     async def _notify_progress(self):
-        """İlerleme bildir"""
+        """Ilerleme bildir"""
         if self._progress_callback and self.progress:
             try:
                 await self._progress_callback(self.progress)
             except Exception as e:
-                logger.warning(f"Progress callback hatası: {e}")
+                logger.warning(f"Progress callback hatasi: {e}")
     
     async def _get_target_members(self, client: Client, chat_id: int) -> Set[int]:
-        """Hedef gruptaki mevcut üyeleri al"""
+        """Hedef gruptaki mevcut uyeleri al"""
         members = set()
         try:
             async for member in client.get_chat_members(chat_id):
                 members.add(member.user.id)
         except Exception as e:
-            logger.warning(f"Hedef grup üyeleri alınamadı: {e}")
+            logger.warning(f"Hedef grup uyeleri alinamadi: {e}")
         return members
     
-    async def _get_source_members(self, client: Client, chat_id: int, 
-                                  limit: int = 500) -> List[User]:
-        """Kaynak gruptaki üyeleri al"""
-        members = []
+    async def _get_source_members_via_worker(self, worker: UserbotWorker, 
+                                              chat_id: int) -> List[UserInfo]:
+        """Kaynak grup uyelerini worker uzerinden al"""
+        users = []
+        
         try:
-            async for member in client.get_chat_members(chat_id, limit=limit):
-                user = member.user
-                # Filtreleme
-                if user.is_bot:
-                    continue
-                if user.is_deleted:
-                    continue
-                if user.is_scam:
-                    continue
-                members.append(user)
-        except FloodWait as e:
-            logger.warning(f"Üye listesi alırken FloodWait: {e.value}s")
-            await asyncio.sleep(e.value)
-            return await self._get_source_members(client, chat_id, limit)
+            raw_users = await worker.get_users_from_chat(chat_id)
+            for user in raw_users:
+                if not user.is_bot and not user.is_deleted:
+                    users.append(UserInfo(
+                        user_id=user.id,
+                        username=user.username,
+                        first_name=user.first_name
+                    ))
         except Exception as e:
-            logger.error(f"Kaynak grup üyeleri alınamadı: {e}")
-        return members
+            logger.error(f"Kaynak grup uyeleri alinamadi: {e}")
+        
+        return users
     
-    async def _prepare_user_list(self, source_members: List[User], 
+    async def _prepare_user_list(self, source_members: List[UserInfo], 
                                  target_members: Set[int],
-                                 target_group_id: int) -> List[User]:
-        """Eklenecek kullanıcı listesini hazırla"""
+                                 target_group_id: int) -> List[UserInfo]:
+        """Eklenecek kullanici listesini hazirla"""
         users_to_add = []
         valid_users_first = []
         other_users = []
         
         for user in source_members:
             # Zaten hedefte mi?
-            if user.id in target_members:
+            if user.user_id in target_members:
                 continue
             
-            # Daha önce bu görevde işlendi mi?
-            if user.id in self._processed_users:
+            # Daha once bu gorevde islendi mi?
+            if user.user_id in self._processed_users:
                 continue
             
             # Kara listede mi?
-            if await self.db.is_blacklisted(user.id):
+            if await self.db.is_blacklisted(user.user_id):
                 continue
             
-            # Daha önce bu gruba eklendi mi?
-            if await self.db.is_user_added_to_group(user.id, target_group_id):
+            # Daha once bu gruba eklendi mi?
+            if await self.db.is_user_added_to_group(user.user_id, target_group_id):
                 continue
             
-            # Valid user mı? (öncelikli)
+            # Valid user mi?
             if config.AddingConfig.PRIORITIZE_VALID_USERS:
-                if await self.db.is_valid_user(user.id):
+                if await self.db.is_valid_user(user.user_id):
                     valid_users_first.append(user)
                 else:
                     other_users.append(user)
             else:
                 other_users.append(user)
         
-        # Valid user'ları önce, sonra diğerlerini ekle
-        users_to_add = valid_users_first + other_users
-        
-        # Karıştır (aynı kategoride)
+        # Karistir
         if len(valid_users_first) > 1:
             random.shuffle(valid_users_first)
         if len(other_users) > 1:
@@ -162,22 +169,20 @@ class MemberAddingEngine:
         
         users_to_add = valid_users_first + other_users
         
-        logger.info(f"Eklenecek: {len(users_to_add)} kullanıcı "
+        logger.info(f"Eklenecek: {len(users_to_add)} kullanici "
                    f"({len(valid_users_first)} valid, {len(other_users)} yeni)")
         
         return users_to_add
     
     async def _get_delay(self, batch_count: int) -> float:
-        """Bekleme süresi hesapla"""
+        """Bekleme suresi hesapla"""
         if batch_count > 0 and batch_count % config.AddingConfig.BATCH_SIZE == 0:
-            # Batch molası
             delay = random.uniform(
                 config.AddingConfig.BATCH_DELAY_MIN,
                 config.AddingConfig.BATCH_DELAY_MAX
             )
-            logger.info(f"Batch molası: {int(delay)}s")
+            logger.info(f"Batch molasi: {int(delay)}s")
         else:
-            # Normal bekleme
             delay = random.uniform(
                 config.AddingConfig.MIN_DELAY,
                 config.AddingConfig.MAX_DELAY
@@ -187,7 +192,7 @@ class MemberAddingEngine:
     async def start_adding(self, admin_client: Client, 
                           source_chat: int | str,
                           target_chat: int | str) -> Dict[str, Any]:
-        """Üye ekleme işlemini başlat"""
+        """Uye ekleme islemini baslat"""
         result = {
             "success": False,
             "task_id": None,
@@ -198,58 +203,77 @@ class MemberAddingEngine:
         }
         
         if self.is_running:
-            result["error"] = "Zaten aktif bir görev var"
+            result["error"] = "Zaten aktif bir gorev var"
             return result
         
         try:
-            # Grupları doğrula
+            # Gruplari dogrula
             try:
                 source_entity = await admin_client.get_chat(source_chat)
                 target_entity = await admin_client.get_chat(target_chat)
             except ChannelPrivate:
-                result["error"] = "Grup/kanal özel ve erişiminiz yok"
+                result["error"] = "Grup/kanal ozel ve erisiniz yok"
                 return result
             except Exception as e:
-                result["error"] = f"Grup bulunamadı: {e}"
+                result["error"] = f"Grup bulunamadi: {e}"
                 return result
             
             result["source_title"] = source_entity.title
             result["target_title"] = target_entity.title
             
-            # Hedef gruptaki mevcut üyeleri al
-            target_members = await self._get_target_members(admin_client, target_entity.id)
+            # Username'leri kaydet
+            self._source_username = getattr(source_entity, 'username', None) or str(source_chat)
+            self._target_username = getattr(target_entity, 'username', None) or str(target_chat)
             
-            # Kaynak grup üyelerini al
-            source_members = await self._get_source_members(admin_client, source_entity.id)
-            
-            if not source_members:
-                result["error"] = "Kaynak grupta eklenebilir üye bulunamadı"
+            # Musait worker kontrolu
+            available_workers = self.manager.get_available_workers()
+            if not available_workers:
+                result["error"] = "Musait worker yok. Once /session ile worker ekleyin."
                 return result
             
-            # Eklenecek kullanıcı listesini hazırla
+            # Worker'lari gruplara katildir
+            if config.AddingConfig.AUTO_JOIN_ENABLED:
+                logger.info("Worker'lar gruplara katiliyor...")
+                
+                # Kaynak gruba katil
+                source_join_id = self._source_username if self._source_username else source_entity.id
+                await self.manager.ensure_workers_in_chat(source_join_id, source_entity.id)
+                await asyncio.sleep(2)
+                
+                # Hedef gruba katil  
+                target_join_id = self._target_username if self._target_username else target_entity.id
+                await self.manager.ensure_workers_in_chat(target_join_id, target_entity.id)
+                await asyncio.sleep(2)
+            
+            # Ilk worker'i sec
+            worker = await self.manager.get_next_available_worker()
+            if not worker:
+                result["error"] = "Worker gruplara katilamadi"
+                return result
+            
+            # ONEMLI: Uyeleri worker uzerinden al (PEER_ID_INVALID onlemi)
+            logger.info("Uyeler worker uzerinden aliniyor...")
+            source_members = await self._get_source_members_via_worker(worker, source_entity.id)
+            
+            if not source_members:
+                result["error"] = "Kaynak grupta eklenebilir uye bulunamadi"
+                return result
+            
+            # Hedef grup uyelerini al
+            target_members = await self._get_target_members(admin_client, target_entity.id)
+            
+            # Eklenecek kullanici listesini hazirla
             users_to_add = await self._prepare_user_list(
                 source_members, target_members, target_entity.id
             )
             
             if not users_to_add:
-                result["error"] = "Tüm üyeler zaten hedefte veya kara listede"
+                result["error"] = "Tum uyeler zaten hedefte veya kara listede"
                 return result
             
             result["total_users"] = len(users_to_add)
             
-            # Worker'ların gruplarda olduğundan emin ol
-            if config.AddingConfig.AUTO_JOIN_ENABLED:
-                logger.info("Worker'lar gruplara katılıyor...")
-                await self.manager.ensure_workers_in_chat(source_entity.id)
-                await self.manager.ensure_workers_in_chat(target_entity.id)
-            
-            # Müsait worker kontrolü
-            available_workers = self.manager.get_available_workers()
-            if not available_workers:
-                result["error"] = "Müsait worker yok"
-                return result
-            
-            # Task oluştur
+            # Task olustur
             task_id = await self.db.create_task(
                 source_group_id=source_entity.id,
                 target_group_id=target_entity.id,
@@ -260,12 +284,12 @@ class MemberAddingEngine:
             result["task_id"] = task_id
             result["success"] = True
             
-            # Ekleme görevini başlat
+            # Baslat
             self.is_running = True
             self.should_stop = False
             self._processed_users.clear()
             
-            # Progress başlat
+            # Progress baslat
             self.progress = AddingProgress(
                 task_id=task_id,
                 status=TaskStatus.RUNNING,
@@ -283,26 +307,31 @@ class MemberAddingEngine:
                 errors=[]
             )
             
-            # Async olarak ekleme başlat
+            # Async olarak ekleme baslat
             asyncio.create_task(self._adding_loop(
                 target_entity.id,
                 users_to_add,
-                source_entity.id
+                source_entity.id,
+                worker  # Ayni worker'i kullan
             ))
             
             return result
             
         except Exception as e:
             result["error"] = str(e)
-            logger.error(f"Ekleme başlatma hatası: {e}")
+            logger.error(f"Ekleme baslatma hatasi: {e}")
+            import traceback
+            traceback.print_exc()
             return result
     
     async def _adding_loop(self, target_group_id: int, 
-                          users: List[User],
-                          source_group_id: int):
-        """Ana ekleme döngüsü"""
+                          users: List[UserInfo],
+                          source_group_id: int,
+                          primary_worker: UserbotWorker):
+        """Ana ekleme dongusu"""
         batch_count = 0
         start_time = datetime.now()
+        current_worker = primary_worker
         
         try:
             for i, user in enumerate(users):
@@ -317,41 +346,47 @@ class MemberAddingEngine:
                 if self.should_stop:
                     break
                 
-                # Çakışma kontrolü
-                if user.id in self._processed_users:
+                # Cakisma kontrolu
+                if user.user_id in self._processed_users:
                     continue
                 
-                self._processed_users.add(user.id)
+                self._processed_users.add(user.user_id)
                 
-                # Progress güncelle
-                user_name = user.first_name or user.username or str(user.id)
+                # Progress guncelle
+                user_name = user.first_name or user.username or str(user.user_id)
                 if self.progress:
                     self.progress.current_user = user_name
                     self.progress.processed = i + 1
                     
-                    # Tahmini süre hesapla
+                    # Tahmini sure hesapla
                     elapsed = (datetime.now() - start_time).total_seconds()
                     if self.progress.added > 0:
                         avg_time = elapsed / self.progress.added
                         remaining = (len(users) - i) * avg_time
                         self.progress.estimated_remaining = int(remaining)
                 
-                # Müsait worker al
-                worker = await self.manager.get_next_available_worker()
+                # Worker kontrolu - musait degilse diger worker'i dene
+                if not current_worker.is_available or not current_worker.is_connected:
+                    new_worker = await self.manager.get_next_available_worker()
+                    if new_worker:
+                        current_worker = new_worker
+                        # Yeni worker icin uyeleri yukle
+                        await current_worker.get_users_from_chat(source_group_id)
+                    else:
+                        logger.warning("Musait worker yok, bekleniyor...")
+                        await asyncio.sleep(60)
+                        current_worker = await self.manager.get_next_available_worker()
+                        if not current_worker:
+                            if self.progress:
+                                self.progress.errors.append("Musait worker kalmadi")
+                            break
                 
-                if not worker:
-                    logger.warning("Müsait worker yok, bekleniyor...")
-                    # Tüm worker'lar meşgul, bekle
-                    await asyncio.sleep(60)
-                    worker = await self.manager.get_next_available_worker()
-                    
-                    if not worker:
-                        if self.progress:
-                            self.progress.errors.append("Müsait worker kalmadı")
-                        break
-                
-                # Kullanıcıyı ekle
-                result = await worker.add_user_to_chat(target_group_id, user.id)
+                # Kullaniciyi ekle - username ile dene
+                result = await current_worker.add_user_to_chat(
+                    target_group_id, 
+                    user.user_id,
+                    user.username
+                )
                 
                 if result["success"]:
                     batch_count += 1
@@ -362,20 +397,20 @@ class MemberAddingEngine:
                     
                     # Valid user olarak kaydet
                     await self.db.add_valid_user(
-                        user_id=user.id,
+                        user_id=user.user_id,
                         username=user.username,
                         first_name=user.first_name,
                         source_group_id=source_group_id
                     )
                     
-                    # Eklendi olarak işaretle
+                    # Eklendi olarak isaretle
                     await self.db.mark_user_added(
-                        user_id=user.id,
+                        user_id=user.user_id,
                         target_group_id=target_group_id,
-                        session_id=worker.session.id
+                        session_id=current_worker.session.id
                     )
                     
-                    logger.info(f"✅ Eklendi: {user_name} (Worker: {worker.session.id})")
+                    logger.info(f"[+] Eklendi: {user_name} (Worker: {current_worker.session.id})")
                     
                 else:
                     error_type = result.get("error_type")
@@ -393,7 +428,7 @@ class MemberAddingEngine:
                     
                     # Kara listeye ekle
                     if result.get("should_blacklist"):
-                        await self.db.add_to_blacklist(user.id, result["error"])
+                        await self.db.add_to_blacklist(user.user_id, result["error"])
                     
                     # FloodWait
                     if result.get("flood_wait", 0) > 0:
@@ -401,10 +436,23 @@ class MemberAddingEngine:
                         if wait_time <= config.AddingConfig.MAX_FLOOD_WAIT:
                             logger.info(f"FloodWait bekleniyor: {wait_time}s")
                             await asyncio.sleep(wait_time + 5)
+                        else:
+                            # Baska worker dene
+                            new_worker = await self.manager.get_next_available_worker()
+                            if new_worker and new_worker != current_worker:
+                                current_worker = new_worker
+                                await current_worker.get_users_from_chat(source_group_id)
                     
-                    logger.warning(f"❌ Başarısız: {user_name} - {result['error']}")
+                    # Worker devre disi kaldiysa
+                    if result.get("worker_disabled"):
+                        new_worker = await self.manager.get_next_available_worker()
+                        if new_worker:
+                            current_worker = new_worker
+                            await current_worker.get_users_from_chat(source_group_id)
+                    
+                    logger.warning(f"[-] Basarisiz: {user_name} - {result['error']}")
                 
-                # Müsait worker sayısını güncelle
+                # Musait worker sayisini guncelle
                 if self.progress:
                     available = self.manager.get_available_workers()
                     self.progress.available_workers = len(available)
@@ -417,7 +465,7 @@ class MemberAddingEngine:
                 delay = await self._get_delay(batch_count)
                 await asyncio.sleep(delay)
             
-            # Tamamlandı
+            # Tamamlandi
             status = TaskStatus.COMPLETED if not self.should_stop else TaskStatus.CANCELLED
             if self.progress:
                 self.progress.status = status
@@ -426,10 +474,12 @@ class MemberAddingEngine:
             await self.db.complete_task(self.current_task_id, status.value)
             await self._notify_progress()
             
-            logger.info(f"Görev tamamlandı: {status.value}")
+            logger.info(f"Gorev tamamlandi: {status.value}")
             
         except Exception as e:
-            logger.error(f"Ekleme döngüsü hatası: {e}")
+            logger.error(f"Ekleme dongusu hatasi: {e}")
+            import traceback
+            traceback.print_exc()
             if self.progress:
                 self.progress.status = TaskStatus.FAILED
                 self.progress.errors.append(str(e))
@@ -441,7 +491,7 @@ class MemberAddingEngine:
             self.current_task_id = None
     
     async def pause(self):
-        """Görevi duraklat"""
+        """Gorevi duraklat"""
         if self.is_running:
             self.is_paused = True
             if self.progress:
@@ -449,7 +499,7 @@ class MemberAddingEngine:
             await self._notify_progress()
     
     async def resume(self):
-        """Görevi devam ettir"""
+        """Gorevi devam ettir"""
         if self.is_running and self.is_paused:
             self.is_paused = False
             if self.progress:
@@ -457,7 +507,7 @@ class MemberAddingEngine:
             await self._notify_progress()
     
     async def stop(self):
-        """Görevi durdur"""
+        """Gorevi durdur"""
         self.should_stop = True
         self.is_paused = False
         if self.progress:
@@ -465,5 +515,5 @@ class MemberAddingEngine:
         await self._notify_progress()
     
     def get_progress(self) -> Optional[AddingProgress]:
-        """Mevcut ilerlemeyi döndür"""
+        """Mevcut ilerlemeyi dondur"""
         return self.progress
