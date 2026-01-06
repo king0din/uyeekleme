@@ -1,15 +1,20 @@
 """
 Telegram Multi-Client Member Adder - Main Application
 ======================================================
-Ana uygulama giriş noktası.
+Ana uygulama giris noktasi.
+Windows uyumlu (emoji yok).
 """
 
 import os
 import sys
 import asyncio
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
+
+# Windows icin event loop policy
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from pyrogram import Client
 
@@ -29,15 +34,23 @@ def setup_logging():
     
     formatter = logging.Formatter(config.LogConfig.FORMAT)
     
-    # Console handler
+    # Console handler - UTF-8 encoding
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
+    
+    # Windows icin encoding ayarla
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except:
+            pass
     
     # File handler
     file_handler = RotatingFileHandler(
         config.LogConfig.FILE,
         maxBytes=config.LogConfig.MAX_SIZE,
-        backupCount=config.LogConfig.BACKUP_COUNT
+        backupCount=config.LogConfig.BACKUP_COUNT,
+        encoding='utf-8'
     )
     file_handler.setFormatter(formatter)
     
@@ -47,34 +60,32 @@ def setup_logging():
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
     
-    # Pyrogram logger'ını sessize al
+    # Pyrogram logger'ini sessize al
     logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 
 logger = logging.getLogger(__name__)
 
 
-# ==================== GÜNLÜK SIFIRLAMA ====================
+# ==================== GUNLUK SIFIRLAMA ====================
 
 async def daily_reset_task(db):
-    """Her gün gece yarısı sayaçları sıfırla"""
+    """Her gun gece yarisi sayaclari sifirla"""
     while True:
         now = datetime.now()
-        # Bir sonraki gece yarısı
         tomorrow = datetime(now.year, now.month, now.day) + timedelta(days=1)
         wait_seconds = (tomorrow - now).total_seconds()
         
         await asyncio.sleep(wait_seconds)
         
-        # Sıfırla
         count = await db.reset_daily_counts()
-        logger.info(f"Günlük sayaçlar sıfırlandı: {count} session")
+        logger.info(f"Gunluk sayaclar sifirlandi: {count} session")
 
 
 # ==================== ANA UYGULAMA ====================
 
 class MemberAdderApp:
-    """Ana uygulama sınıfı"""
+    """Ana uygulama sinifi"""
     
     def __init__(self):
         self.bot: Client = None
@@ -84,35 +95,35 @@ class MemberAdderApp:
         self.handlers: BotHandlers = None
     
     async def initialize(self):
-        """Uygulamayı başlat"""
+        """Uygulamayi baslat"""
         logger.info("=" * 50)
         logger.info("Telegram Multi-Client Member Adder")
         logger.info("=" * 50)
         
-        # Yapılandırma kontrolü
+        # Yapilandirma kontrolu
         if config.API_ID == 12345678 or config.API_HASH == "your_api_hash_here":
-            logger.error("⚠️  API_ID ve API_HASH ayarlanmamış!")
-            logger.error("config.py dosyasını düzenleyin.")
+            logger.error("[!] API_ID ve API_HASH ayarlanmamis!")
+            logger.error("    config.py dosyasini duzenleyin.")
             return False
         
         if config.BOT_TOKEN == "your_bot_token_here":
-            logger.error("⚠️  BOT_TOKEN ayarlanmamış!")
-            logger.error("@BotFather'dan token alın ve config.py'yi düzenleyin.")
+            logger.error("[!] BOT_TOKEN ayarlanmamis!")
+            logger.error("    @BotFather'dan token alin ve config.py'yi duzenleyin.")
             return False
         
         if config.OWNER_ID == 123456789:
-            logger.error("⚠️  OWNER_ID ayarlanmamış!")
-            logger.error("Telegram ID'nizi config.py'ye girin.")
+            logger.error("[!] OWNER_ID ayarlanmamis!")
+            logger.error("    Telegram ID'nizi config.py'ye girin.")
             return False
         
-        # Veritabanı
-        logger.info("Veritabanı başlatılıyor...")
+        # Veritabani
+        logger.info("Veritabani baslatiliyor...")
         self.db = get_database()
         await self.db.initialize()
-        logger.info("✅ Veritabanı hazır")
+        logger.info("[OK] Veritabani hazir")
         
         # Bot client
-        logger.info("Bot başlatılıyor...")
+        logger.info("Bot baslatiliyor...")
         self.bot = Client(
             name="member_adder_bot",
             api_id=config.API_ID,
@@ -122,7 +133,7 @@ class MemberAdderApp:
         )
         
         # Userbot manager
-        logger.info("Worker manager başlatılıyor...")
+        logger.info("Worker manager baslatiliyor...")
         self.manager = UserbotManager(self.db)
         
         # Adding engine
@@ -135,43 +146,46 @@ class MemberAdderApp:
         return True
     
     async def start(self):
-        """Botu başlat ve çalıştır"""
+        """Botu baslat ve calistir"""
         try:
-            # Bot'u başlat
+            # Bot'u baslat
             await self.bot.start()
             me = await self.bot.get_me()
-            logger.info(f"✅ Bot başlatıldı: @{me.username}")
+            logger.info(f"[OK] Bot baslatildi: @{me.username}")
             
-            # Mevcut session'ları yükle
-            logger.info("Userbot'lar yükleniyor...")
+            # Mevcut session'lari yukle
+            logger.info("Userbot'lar yukleniyor...")
             connected = await self.manager.load_all_sessions()
-            logger.info(f"✅ {connected} userbot bağlandı")
+            logger.info(f"[OK] {connected} userbot baglandi")
             
-            # İstatistikler
+            # Istatistikler
             stats = await self.db.get_stats()
-            logger.info(f"📊 Valid users: {stats['valid_users']}")
-            logger.info(f"📊 Blacklist: {stats['blacklisted_users']}")
-            logger.info(f"📊 Toplam eklenen: {stats['total_added']}")
+            logger.info(f"[STATS] Valid users: {stats['valid_users']}")
+            logger.info(f"[STATS] Blacklist: {stats['blacklisted_users']}")
+            logger.info(f"[STATS] Toplam eklenen: {stats['total_added']}")
             
             logger.info("")
-            logger.info("🚀 Sistem hazır!")
-            logger.info(f"👤 Owner ID: {config.OWNER_ID}")
+            logger.info("[OK] Sistem hazir!")
+            logger.info(f"[INFO] Owner ID: {config.OWNER_ID}")
+            logger.info("[INFO] Durdurmak icin Ctrl+C")
             logger.info("")
             
-            # Çalışmaya devam et
-            await asyncio.Event().wait()
+            # Botu calisir durumda tut
+            from pyrogram import idle
+            await idle()
             
         except KeyboardInterrupt:
-            logger.info("Kapatılıyor...")
+            logger.info("Kapatiliyor...")
         except Exception as e:
             logger.error(f"Hata: {e}")
-            raise
+            import traceback
+            traceback.print_exc()
         finally:
             await self.shutdown()
     
     async def shutdown(self):
-        """Uygulamayı kapat"""
-        logger.info("Sistem kapatılıyor...")
+        """Uygulamayi kapat"""
+        logger.info("Sistem kapatiliyor...")
         
         if self.engine and self.engine.is_running:
             await self.engine.stop()
@@ -180,9 +194,12 @@ class MemberAdderApp:
             await self.manager.shutdown()
         
         if self.bot:
-            await self.bot.stop()
+            try:
+                await self.bot.stop()
+            except:
+                pass
         
-        logger.info("Sistem kapatıldı.")
+        logger.info("Sistem kapatildi.")
 
 
 async def main():
@@ -194,16 +211,16 @@ async def main():
     if await app.initialize():
         await app.start()
     else:
-        logger.error("Başlatma başarısız!")
+        logger.error("Baslatma basarisiz!")
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Data klasörünü oluştur
+    # Data klasorunu olustur
     os.makedirs("data/logs", exist_ok=True)
     
-    # Çalıştır
+    # Calistir
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        print("\nCikis yapiliyor...")
